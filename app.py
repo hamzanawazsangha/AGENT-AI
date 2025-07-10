@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from openai import OpenAI
+import openai
 import whisper
 import os
 import tempfile
@@ -85,11 +85,11 @@ def get_ai_reply(user_text):
         {"role": "system", "content": "You are Arslan, a friendly digital marketer from Doha. Speak short and professionally."},
         {"role": "user", "content": user_text}
     ]
-    reply = client.chat.completions.create(
+    response = openai.ChatCompletion.create(
         model="gpt-4o",
         messages=messages
-    ).choices[0].message.content.strip()
-    return reply
+    )
+    return response.choices[0].message["content"].strip()
 
 
 def say_to_caller(call_sid, text):
