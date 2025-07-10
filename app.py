@@ -14,7 +14,7 @@ import logging
 app = Flask(__name__)
 
 # Load Whisper model and OpenAI client
-stt = whisper.load_model("base")
+stt = whisper.load_model("tiny", device="cpu")
 client = OpenAI()
 
 # Twilio credentials from Render environment
