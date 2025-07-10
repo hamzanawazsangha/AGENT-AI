@@ -7,4 +7,5 @@ soundfile>=0.12.1
 scipy>=1.10.0
 requests>=2.31.0
 ffmpeg-python
+gunicorn
 openai-whisper @ git+https://github.com/openai/whisper.git
