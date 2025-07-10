@@ -3,30 +3,42 @@ import openai
 import whisper
 import os
 import tempfile
-import requests
-from twilio.twiml.voice_response import VoiceResponse, Start, Stream
-from twilio.rest import Client as TwilioClient
 import base64
-import json
 import logging
+from twilio.twiml.voice_response import VoiceResponse, Start
+from twilio.rest import Client as TwilioClient
+from sentence_transformers import SentenceTransformer, util
 
-# Init Flask app
+# Initialize Flask app
 app = Flask(__name__)
 
-# Load Whisper model and OpenAI client
+# Load Whisper model
 stt = whisper.load_model("tiny", device="cpu")
+
+# Load OpenAI key
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Twilio credentials from Render environment
+# Twilio setup
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# Log basic info
+# Logging
 logging.basicConfig(level=logging.INFO)
 
-# WebSocket message buffer per call
+# Load Arslan's content for RAG
+with open("arslanasghar_full_content.txt", "r", encoding="utf-8") as f:
+    full_text = f.read()
+
+# Split content into manageable chunks
+rag_chunks = [chunk.strip() for chunk in full_text.split("\n\n") if chunk.strip()]
+
+# Embed chunks using sentence transformer
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+chunk_embeddings = embedder.encode(rag_chunks, convert_to_tensor=True)
+
+# Audio buffers
 buffers = {}
 
 @app.route("/ws-audio", methods=["POST"])
@@ -38,7 +50,7 @@ def websocket_audio():
         payload = base64.b64decode(data["media"]["payload"])
         buffers.setdefault(call_sid, b"").__iadd__(payload)
 
-        if len(buffers[call_sid]) > 16000 * 5:
+        if len(buffers[call_sid]) > 16000 * 5:  # 5 seconds of audio
             audio_bytes = buffers[call_sid]
             buffers[call_sid] = b""
 
@@ -67,7 +79,6 @@ def websocket_audio():
 def handle_call():
     from_number = request.form.get("From")
     response = VoiceResponse()
-
     response.say("Hello, this is Arslan. I am listening.", voice="man")
 
     start = Start()
@@ -76,15 +87,29 @@ def handle_call():
     response.append(start)
 
     logging.info(f"Started streaming for caller: {from_number}")
-
     return str(response)
 
 
 def get_ai_reply(user_text):
+    # Step 1: Embed user query
+    query_embedding = embedder.encode(user_text, convert_to_tensor=True)
+
+    # Step 2: Find top relevant chunk
+    hits = util.semantic_search(query_embedding, chunk_embeddings, top_k=2)
+    top_chunks = [rag_chunks[hit["corpus_id"]] for hit in hits[0]]
+
+    # Step 3: Add context
+    context = "\n".join(top_chunks)
+
     messages = [
-        {"role": "system", "content": "You are Arslan, a friendly digital marketer from Doha. Speak short and professionally."},
-        {"role": "user", "content": user_text}
+        {"role": "system", "content": (
+            "You are Arslan, a helpful and professional digital marketer based in Doha. "
+            "Provide short and clear answers like a human, using only relevant details."
+        )},
+        {"role": "user", "content": f"Context: {context}\n\nQuestion: {user_text}"}
     ]
+
+    # Step 4: Generate AI reply
     response = openai.ChatCompletion.create(
         model="gpt-4o",
         messages=messages
