@@ -15,7 +15,7 @@ app = Flask(__name__)
 
 # Load Whisper model and OpenAI client
 stt = whisper.load_model("tiny", device="cpu")
-client = OpenAI()
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Twilio credentials from Render environment
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
