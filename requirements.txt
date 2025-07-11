@@ -7,6 +7,7 @@ soundfile>=0.12.1
 scipy>=1.10.0
 requests>=2.31.0
 huggingface_hub==0.15.1
+tokenizers==0.13.3
 sentence-transformers==2.2.2
 ffmpeg-python
 gunicorn
