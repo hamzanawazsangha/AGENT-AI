@@ -1,6 +1,5 @@
 from flask import Flask, request
 import openai
-import whisper
 import os
 import tempfile
 import base64
@@ -13,7 +12,7 @@ import torch
 # Initialize Flask app
 app = Flask(__name__)
 
-# Load OpenAI API key
+# Load OpenAI key
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Twilio setup
@@ -25,17 +24,14 @@ twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 # Logging
 logging.basicConfig(level=logging.INFO)
 
-# Load Whisper model once
-stt = whisper.load_model("tiny", device="cpu")
-
-# Load Arslan's knowledge base
+# Load RAG content
 with open("arslanasghar_full_content.txt", "r", encoding="utf-8") as f:
     full_text = f.read()
 rag_chunks = [chunk.strip() for chunk in full_text.split("\n\n") if chunk.strip()]
 
-# Load SentenceTransformer and compute embeddings only once
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
-chunk_embeddings = embedder.encode(rag_chunks, convert_to_tensor=True, device='cpu')
+# Load embedding model (lightweight)
+embedder = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
+torch.set_grad_enabled(False)
 
 # Audio buffers
 buffers = {}
@@ -49,32 +45,24 @@ def websocket_audio():
         payload = base64.b64decode(data["media"]["payload"])
         buffers.setdefault(call_sid, b"").__iadd__(payload)
 
-        if len(buffers[call_sid]) > 16000 * 5:  # 5 sec audio
-            audio_bytes = buffers.pop(call_sid, b"")
+        if len(buffers[call_sid]) > 16000 * 5:  # ~5 seconds audio
+            audio_bytes = buffers[call_sid]
+            buffers[call_sid] = b""
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
                 f.write(audio_bytes)
                 audio_path = f.name
 
-            try:
-                audio_tensor = whisper.load_audio(audio_path)
-                audio_tensor = whisper.pad_or_trim(audio_tensor)
-                mel = whisper.log_mel_spectrogram(audio_tensor).to("cpu")
+            with open(audio_path, "rb") as f:
+                transcript = openai.Audio.transcribe("whisper-1", f)
+            user_text = transcript["text"].strip()
 
-                result = whisper.decode(stt, mel, whisper.DecodingOptions(fp16=False))
-                user_text = result.text.strip()
-                logging.info(f"[{call_sid}] said: {user_text}")
+            logging.info(f"Caller [{call_sid}] said: {user_text}")
 
-                if user_text:
-                    reply = get_ai_reply(user_text)
-                    logging.info(f"Arslan replies: {reply}")
-                    say_to_caller(call_sid, reply)
-
-            except Exception as e:
-                logging.error(f"Error processing audio: {e}")
-            finally:
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
+            if user_text:
+                reply = get_ai_reply(user_text)
+                logging.info(f"Arslan says: {reply}")
+                say_to_caller(call_sid, reply)
 
     return ("", 204)
 
@@ -90,22 +78,32 @@ def handle_call():
     start.stream(url=stream_url)
     response.append(start)
 
-    logging.info(f"Started streaming for: {from_number}")
+    logging.info(f"Started streaming for caller: {from_number}")
     return str(response)
 
 
 def get_ai_reply(user_text):
-    # Embed user query and search
     query_embedding = embedder.encode(user_text, convert_to_tensor=True, device='cpu')
-    hits = util.semantic_search(query_embedding, chunk_embeddings, top_k=2)
-    top_chunks = [rag_chunks[hit["corpus_id"]] for hit in hits[0]]
-    context = "\n".join(top_chunks)
 
-    # Ask OpenAI using the context
+    top_chunks = []
+    for chunk in rag_chunks:
+        chunk_embedding = embedder.encode(chunk, convert_to_tensor=True, device='cpu')
+        similarity = util.pytorch_cos_sim(query_embedding, chunk_embedding).item()
+
+        if len(top_chunks) < 2:
+            top_chunks.append((similarity, chunk))
+        else:
+            min_sim = min(top_chunks, key=lambda x: x[0])[0]
+            if similarity > min_sim:
+                top_chunks.sort(key=lambda x: x[0])
+                top_chunks[0] = (similarity, chunk)
+
+    context = "\n".join([chunk for _, chunk in sorted(top_chunks, reverse=True)])
+
     messages = [
         {"role": "system", "content": (
-            "You are Arslan, a helpful and professional digital marketer based in Doha. "
-            "Answer briefly, like a human, using only relevant information from the context."
+            "You are Arslan, a professional digital marketer from Doha. "
+            "Speak concisely and naturally, as if you are human. Use only relevant info from the context."
         )},
         {"role": "user", "content": f"Context: {context}\n\nQuestion: {user_text}"}
     ]
